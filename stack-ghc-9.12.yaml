@@ -1,4 +1,4 @@
-snapshot: lts-24.34
+snapshot: nightly-2026-03-06
 system-ghc: true
 
 packages:

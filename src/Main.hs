@@ -1,15 +1,12 @@
-{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE RecordWildCards #-}
 --------------------------------------------------------------------
 -- |
 -- Module    : ghc-gc-tune
 -- Copyright : (c) Don Stewart, 2010-2012
 -- License   : BSD3
 --
--- Maintainer: Don Stewart <dons00@gmail.com>
+-- Maintainer: community
 -- Stability : provisional
--- Portability: Needs a few libraries from hackage.
+-- Portability: Portable
 --
 --------------------------------------------------------------------
 --
@@ -25,24 +22,23 @@
 
 module Main where
 
-import System.IO
-import System.Exit
-import System.Environment
-import System.Directory
-import System.Console.GetOpt
-import Data.List
-import Data.Char
-import Data.Maybe
-import Data.Int
-import Data.Function
-import Data.Ord
-import Control.Monad
 import Control.Concurrent
-import Text.Printf
-import System.Process hiding (readProcess)
-import qualified Control.Exception as C
-
+import Control.Monad
+import Data.Char
+import Data.Function
+import Data.Int
+import Data.List (groupBy, intercalate, intersperse, sortBy)
+import Data.Maybe
+import Data.Ord
+import System.Console.GetOpt
+import System.Directory
+import System.Environment
+import System.Exit
 import System.FilePath
+import System.IO
+import System.Process
+import Text.Printf
+import qualified Control.Exception as C
 
 ------------------------------------------------------------------------
 
@@ -196,7 +192,7 @@ defaults o = unlines
 --
 -- | A data type to represent the output of +RTS -t --machine-readable
 --
--- <http://haskell.org/ghc/docs/6.12.1/html/users_guide/runtime-control.html#rts-options-gc>
+-- <https://downloads.haskell.org/ghc/latest/docs/users_guide/runtime_control.html#rts-options-to-produce-runtime-statistics>
 --
 -- * The peak memory the RTS has allocated from the OS.
 -- * The maximum resident memory
@@ -204,27 +200,30 @@ defaults o = unlines
 --
 data GCStats = GCStats
     {   numberOfGCs :: !Int64   -- ^ total number of GCs
-    ,   peakMemory  :: !Int64   -- ^ peak memory allocated
-    ,   maxResident :: !Int64   -- ^ maximum resident memory
+    ,   peakMemory  :: !Int64   -- ^ peak memory allocated (MB)
+    ,   maxResident :: !Int64   -- ^ maximum resident memory (bytes)
     ,   mutatorTime :: !Double  -- ^ wall clock mutator time
     ,   gcTime      :: !Double  -- ^ wall clock GC time
-    ,   totalTime   :: !Double  -- ^ sum of init, exit, gc, mutator
+    ,   totalTime   :: !Double  -- ^ sum of gc + mutator
     }
     deriving Show
 
+-- | Parse the machine-readable RTS stats output.
+-- Supports both GHC 8.x and 9.x field names.
 parse :: String -> GCStats
 parse s = case maybeRead s of
     Nothing     -> error $ "Can't parse GC stats: " ++ show s
     Just (assocs :: [(String,String)]) ->
 
-        let mgc = do
-                numberOfGCs <- fmap read $ lookup "num_GCs" assocs
-                peakMemory  <- fmap read $ lookup "peak_megabytes_allocated" assocs
-                maxResident <- fmap read $ lookup "max_bytes_used" assocs
-                mutatorTime <- fmap read $ lookup "mut_wall_seconds" assocs
-                gcTime      <- fmap read $ lookup "GC_wall_seconds" assocs
-                return GCStats { totalTime   = mutatorTime + gcTime , .. }
-                                           -- ^ record pun.
+        let lookupAny names = listToMaybe (mapMaybe (\n -> lookup n assocs) names)
+
+            mgc = do
+                numberOfGCs <- fmap read $ lookupAny ["gcs", "num_GCs"]
+                peakMemory  <- parsePeakMB assocs
+                maxResident <- fmap read $ lookupAny ["max_live_bytes", "max_bytes_used"]
+                mutatorTime <- fmap read $ lookupAny ["mut_wall_seconds", "mutator_wall_seconds"]
+                gcTime      <- fmap read $ lookupAny ["gc_wall_seconds", "GC_wall_seconds"]
+                return GCStats { totalTime = mutatorTime + gcTime, .. }
 
         in case mgc of
             Nothing -> error $ "Missing fields in GC stats: " ++ show s
@@ -233,6 +232,14 @@ parse s = case maybeRead s of
         maybeRead z = case reads z of
             [(x, s')] | all isSpace s' -> Just x
             _                          -> Nothing
+
+-- GHC 9.x reports max_mem_in_use_bytes (in bytes);
+-- older GHC reports peak_megabytes_allocated (in megabytes).
+parsePeakMB :: [(String, String)] -> Maybe Int64
+parsePeakMB assocs =
+    case lookup "max_mem_in_use_bytes" assocs of
+        Just val -> Just (read val `div` (1024 * 1024))
+        Nothing  -> fmap read $ lookup "peak_megabytes_allocated" assocs
 
 ------------------------------------------------------------------------
 -- Data type for controlling the GC.
@@ -244,13 +251,13 @@ data GCHooks =
         -- never resized (unless you use -H, below).
           sizeA :: !Int64
 
-        -- | This option provides a “suggested heap size” for the garbage
+        -- | This option provides a "suggested heap size" for the garbage
         -- collector. The garbage collector will use about this much memory
         -- until the program residency grows and the heap size needs to be
         -- expanded to retain reasonable performance.
         , sizeH :: !Int64
 
-        -- | Set the maximal heap size to preven thrashing.
+        -- | Set the maximal heap size to prevent thrashing.
         , sizeM :: Maybe Int64
     }
     deriving Show
@@ -262,10 +269,6 @@ g x = m x * 1024
 
 bToMB :: Int64 -> Double
 bToMB b = fromIntegral b / 1048576
--- bToMB b = case b `quotRem` 1048576 of
---             (q,r)
---                 | r < 524288 -> q
---                 | otherwise  -> q+1
 
 --
 -- static defaults for various A and H sizes. Need an algorithm to determine these
@@ -325,77 +328,72 @@ main = do
                    Nothing -> return ()
                  return (hooks, s)
 
-    when (null . catMaybes . map snd $ stats)  $ do
+    when (null $ mapMaybe snd stats) $
         error "All program runs failed, unable to collect data."
 
     when (optTime opts) (best exe opts "time" "Running time" "s" "seconds" totalTime stats)
     when (optPeak opts) (best exe opts "peak" "Peak memory" "MB" "MB" (fromIntegral . peakMemory) stats)
     when (optResi opts) (best exe opts "residency" "Resident memory" "MB" "MB" (bToMB . maxResident) stats)
     when (optTime opts && optResi opts)
-        (best exe opts "integ" "Residency*Time" "MBs" "MBs" (\s -> totalTime s * bToMB (maxResident s)) stats)
+        (best exe opts "integ" "Residency*Time" "MBs" "MBs" (\s' -> totalTime s' * bToMB (maxResident s')) stats)
 
 -- stats-output separate for various outputs
 
 best :: String -> Options -> String -> String -> String -> String -> (GCStats -> Double) -> [(GCHooks, Maybe GCStats)] -> IO ()
-best exe opts short title unit longunit field stats = do
+best exe opts short title unit _longunit field stats = do
     let best5 = take 5 $ sortBy (comparing thd3)
                     [(sizeA gs, sizeH gs, field r) | (gs, Just r) <- stats]
     putStrLn $ "Best settings for " ++ title ++ ":"
-    forM best5 $ \(bestA, bestH, bestF) ->
+    forM_ best5 $ \(bestA, bestH, bestF) ->
         printf "%.2f%s:  +RTS -A%d -H%d\n" bestF unit bestA bestH
 
-    -- TODO graph Z as time or space.
     -- x is A, y is H, z is total time
     let space = groupBy ((==) `on` fst3)
                  [ (sizeA gs, sizeH gs, field r) | (gs,Just r) <- stats ]
 
-
     C.bracket
         (openTempFile "/tmp" ("ghc-gc-tune-" ++ short ++ "-XXXX.dat"))
-        (\(f,_) -> removeFile f)
-        $ \(f,h) -> do
+        (\(f',_) -> removeFile f')
+        $ \(f',h') -> do
 
             -- generate the data file for gnuplot
-            hPutStr h $
-                 concatMap (\s -> case s of
+            hPutStr h' $
+                 concatMap (\chunk -> case chunk of
                          []         -> "\n" -- blank line between Y lines
                          xs         -> unlines $
                                 map (\(x,y,z) -> intercalate " " [show x, show y, show z]) xs
                  ) (intersperse [] space)
 
-            hFlush h >> hClose h
+            hFlush h' >> hClose h'
 
             -- construct the gp script
-            let script = plot3d f exe short title longunit (optType opts)
+            let script = plot3d f' exe short title unit (optType opts)
 
             -- get a handle to the gnuplot process
-            (ih,_,eh,pid) <- C.handle
-                (\(_::C.SomeException) -> error $ "Couldn't fork gnuplot.")
+            (Just ih,_,Just eh,pid) <- C.handle
+                (\(_::C.SomeException) -> error "Couldn't fork gnuplot.")
                 (do mgnu <- findExecutable "gnuplot"
                     case mgnu of
                         Nothing      -> error "Cannot find gnuplot"
-                        Just gnuplot -> runInteractiveCommand gnuplot)
+                        Just gnuplot -> createProcess (proc gnuplot [])
+                            { std_in = CreatePipe, std_err = CreatePipe })
 
             -- print script into gnuplot
-            hPutStrLn ih script -- >> hClose ih -- write into gnuplot
+            hPutStrLn ih script
             hFlush ih
-
-            -- If interactive, tell them to use ^C^C to kill
 
             case optType opts of
                 Nothing -> do
                         putStrLn "Rendering ... type q and ^C^C to exit interactive mode"
-
-                        -- interactive keep it open.
-                        hGetContents eh -- >>= putStr       -- dump any error output it produces
-                        waitForProcess pid
+                        _ <- hGetContents eh
+                        _ <- waitForProcess pid
                         return ()
 
                 Just t  -> do
                         putStrLn $ "Output written to : " ++ outputFile exe short t
                         hClose ih
-                        hGetContents eh -- >>= putStr       -- dump any error output it produces
-                        waitForProcess pid
+                        _ <- hGetContents eh
+                        _ <- waitForProcess pid
                         return ()
 
 
@@ -474,7 +472,6 @@ runGHCProgram exe opts gcflags = do
             printf "Executable failed with error %s\n" (show err)
             return Nothing
 
-                -- drop "test/binary-trees 16 +RTS -t --machine-readable \n "
          Right str     -> return $! Just $! parse str
 
   where
@@ -491,28 +488,30 @@ runGHCProgram exe opts gcflags = do
 --
 -- Strict process reading (we only care about stderr)
 --
-readProcessStderr :: FilePath                              -- ^ command to run
-            -> [String]                              -- ^ any arguments
-            -> String                                -- ^ standard input
-            -> IO (Either (ExitCode,String,String) String)  -- ^ either the stderr, or an exitcode and any output
+readProcessStderr :: FilePath
+            -> [String]
+            -> String
+            -> IO (Either (ExitCode,String,String) String)
 
 readProcessStderr cmd args input = C.handle (return . handler) $ do
-    (inh,outh,errh,pid) <- runInteractiveProcess cmd args Nothing Nothing
+    (Just inh, Just outh, Just errh, pid) <-
+        createProcess (proc cmd args)
+            { std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe }
 
     output  <- hGetContents outh
     outMVar <- newEmptyMVar
-    _ <- forkIO $ (C.evaluate (length output) >> putMVar outMVar ())
+    _ <- forkIO $ C.evaluate (length output) >> putMVar outMVar ()
 
     errput  <- hGetContents errh
     errMVar <- newEmptyMVar
-    _ <- forkIO $ (C.evaluate (length errput) >> putMVar errMVar ())
+    _ <- forkIO $ C.evaluate (length errput) >> putMVar errMVar ()
 
-    when (not (null input)) $ hPutStr inh input
+    unless (null input) $ hPutStr inh input
+    hClose inh
     takeMVar outMVar
     takeMVar errMVar
     ex     <- C.catch (waitForProcess pid) (\(_::C.SomeException) -> return ExitSuccess)
     hClose outh
-    hClose inh
     hClose errh
 
     return $ case ex of
@@ -522,12 +521,6 @@ readProcessStderr cmd args input = C.handle (return . handler) $ do
   where
     handler (e :: C.SomeException) = Left (ExitFailure 1, show e, "")
 
-
-{-
--- Safe wrapper for getEnv
-getEnvMaybe :: String -> IO (Maybe String)
-getEnvMaybe name = handle (const $ return Nothing) (Just `fmap` getEnv name)
--}
 
 fst3 :: (a,b,c) -> a
 fst3 (x,_,_) = x

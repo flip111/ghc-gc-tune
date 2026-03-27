@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: generate
+        uses: freckle/stack-action/generate-matrix@v5
+    outputs:
+      stack-yamls: ${{ steps.generate.outputs.stack-yamls }}
+
+  build-and-test:
+    needs: generate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        stack-yaml: ${{ fromJSON(needs.generate.outputs.stack-yamls) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: freckle/stack-action@v5
+        with:
+          stack-arguments: --stack-yaml ${{ matrix.stack-yaml }}
+          stack-build-arguments: --fast --flag ghc-gc-tune:dev
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/setup@v2
+        with:
+          enable-stack: true
+      - run: stack sdist

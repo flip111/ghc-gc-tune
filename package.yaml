@@ -1,10 +1,10 @@
 name:                ghc-gc-tune
-version:             0.3.2
+version:             0.3.3
 synopsis:            Graph performance of Haskell programs with different GC flags
-description:         >-
+description: >-
                      ghc-gc-tune runs your compiled Haskell program with
                      different GC flags, and generates a graph of time as
-                     those GC settings vary. ghc-gc-tune lets your automate
+                     those GC settings vary. ghc-gc-tune lets you automate
                      the task of finding good GC flags for your program, in
                      order to get the best performance from it.
                      .
@@ -12,34 +12,65 @@ description:         >-
                      installed.
                      .
                      Example use:
-                     . 
+                     .
                      > ghc -O2 --make binarytrees.hs
                      > ghc-gc-tune -t svg binarytrees 12
                      .
-                     Example output:
-                     .
-                     <http://haskell.org/haskellwiki/Ghc-gc-tune>
-                     .
                      For more information on GHC garbage collector settings,
-                     see <http://www.haskell.org/ghc/docs/latest/html/users_guide/runtime-control.html#rts-options-gc>
-                     .
-homepage:            https://github.com/bitemyapp/ghc-gc-tune#readme
+                     see <https://downloads.haskell.org/ghc/latest/docs/users_guide/runtime_control.html#rts-options-to-produce-runtime-statistics>
+
+homepage:            https://github.com/flip111/ghc-gc-tune#readme
 license:             BSD3
 author:              Don Stewart
 maintainer:          community
-copyright:           https://github.com/bitemyapp/ghc-gc-tune
+copyright:           (c) Don Stewart, 2010-2012
 category:            Development
+tested-with:         GHC == 9.10.3, GHC == 9.12.3
+
 extra-source-files:
-- README.md
+  - README.md
+
+language: GHC2024
+
+default-extensions:
+  - RecordWildCards
 
 dependencies:
-  - base >= 4.7 && < 5
+  - base >= 4.20 && < 5
   - directory
   - process
   - filepath
+
+flags:
+  dev:
+    description: Enable -Werror
+    manual: true
+    default: false
+
+ghc-options:
+  - -Weverything
+  - -Wno-all-missed-specialisations
+  - -Wno-implicit-prelude
+  - -Wno-missed-specialisations
+  - -Wno-missing-import-lists
+  - -Wno-missing-safe-haskell-mode
+  - -Wno-name-shadowing
+  - -Wno-prepositive-qualified-module
+  - -Wno-safe
+  - -Wno-unsafe
+  - -Wno-missing-kind-signatures
+  - -Wno-missing-deriving-strategies
+  - -Wno-missing-export-lists
+  - -Wno-missing-local-signatures
+  - -Wno-operator-whitespace
+
+when:
+  - condition: flag(dev)
+    ghc-options:
+      - -Werror
 
 executables:
   ghc-gc-tune:
     source-dirs:      src
     main:             Main.hs
-    ghc-options:      -Wall -O2 -funbox-strict-fields
+    ghc-options:      -O2 -funbox-strict-fields
